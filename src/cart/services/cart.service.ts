@@ -1,55 +1,120 @@
 import { Injectable } from '@nestjs/common';
 
-import { v4 } from 'uuid';
-
 import { Cart } from '../models';
+
+import { InjectClient } from 'nest-postgres';
+import { Client } from 'pg';
 
 @Injectable()
 export class CartService {
-  private userCarts: Record<string, Cart> = {};
+  constructor(@InjectClient() private readonly pg: Client) {}
 
-  findByUserId(userId: string): Cart {
-    return this.userCarts[ userId ];
-  }
+  async findByUserId(): Promise<Cart> {
+    const carts = await this.pg.query(`SELECT * FROM carts`);
 
-  createByUserId(userId: string) {
-    const id = v4(v4());
-    const userCart = {
-      id,
-      items: [],
+    if (!carts.rows?.[0]?.id) {
+      return null;
+    }
+
+    const cartItems = await this.pg.query(
+      `SELECT * FROM cart_items WHERE cart_id=$1`,
+      [carts.rows[0].id],
+    );
+
+    const items = cartItems.rows.map((cartItem) => ({
+      product: { ...cartItem },
+      count: cartItem.count,
+    }));
+
+    const cart = {
+      id: carts.rows[0].id,
+      items,
     };
 
-    this.userCarts[ userId ] = userCart;
+    return cart;
+  }
+
+  async createByUserId(): Promise<Cart> {
+    const date = `${new Date().getFullYear()}-${new Date().getMonth()}-${new Date().getDate()}`;
+    const carts = await this.pg.query(
+      `INSERT INTO carts (updated_at) VALUES ($1, $2) RETURNING *`,
+      [date],
+    );
+
+    const userCart = {
+      id: carts.rows[0].id,
+      items: [],
+    };
 
     return userCart;
   }
 
-  findOrCreateByUserId(userId: string): Cart {
-    const userCart = this.findByUserId(userId);
+  async findOrCreateByUserId(): Promise<Cart> {
+    const userCart = await this.findByUserId();
 
     if (userCart) {
       return userCart;
     }
 
-    return this.createByUserId(userId);
+    const newCart = await this.createByUserId();
+
+    return newCart;
   }
 
-  updateByUserId(userId: string, { items }: Cart): Cart {
-    const { id, ...rest } = this.findOrCreateByUserId(userId);
+  async updateByUserId({ product, count }: any): Promise<Cart> {
+    const { id }: Cart = await this.findOrCreateByUserId();
 
-    const updatedCart = {
-      id,
-      ...rest,
-      items: [ ...items ],
+    const existing = await this.pg.query(
+      `SELECT * FROM cart_items WHERE product_id=$1 AND cart_id=$2`,
+      [product.id, id],
+    );
+
+    if (count > existing.rows?.[0]?.count || !existing.rows?.[0]) {
+      if (existing.rows[0]) {
+        await this.pg.query(
+          `UPDATE cart_items SET count=$3 WHERE product_id=$1 AND cart_id=$2`,
+          [product.id, id, count],
+        );
+      } else {
+        await this.pg.query(
+          `INSERT INTO cart_items (product_id, cart_id, count, title, description, price) VALUES($1, $2, $3, $4, $5, $6)`,
+          [
+            product.id,
+            id,
+            count,
+            product.title,
+            product.description,
+            product.price,
+          ],
+        );
+      }
+    } else if (count === 0 && existing.rows?.[0]?.count > count) {
+      await this.pg.query(`DELETE FROM cart_items WHERE product_id=$1`, [
+        product.id,
+      ]);
+    } else {
+      await this.pg.query(
+        `UPDATE cart_items SET count = $1 WHERE cart_id = $2 AND product_id=$3`,
+        [count, id, product.id],
+      );
     }
 
-    this.userCarts[ userId ] = { ...updatedCart };
+    const cartItems = await this.pg.query(`SELECT * FROM cart_items`);
 
-    return { ...updatedCart };
+    const items = cartItems.rows.map((cartItem) => ({
+      product: { ...cartItem },
+      count: cartItem.count,
+    }));
+
+    const cart = {
+      id,
+      items,
+    };
+
+    return cart;
   }
 
-  removeByUserId(userId): void {
-    this.userCarts[ userId ] = null;
+  async removeByUserId(): Promise<void> {
+    await this.pg.query(`DELETE FROM carts`);
   }
-
 }
